@@ -8,6 +8,7 @@ from werkzeug.utils import secure_filename
 import cloudinary
 import cloudinary.uploader
 from cloudinary.utils import cloudinary_url
+import shutil
 
 app = Flask(__name__)
 CORS(app)
@@ -53,7 +54,7 @@ def upload_file():
         # Upload to Cloudinary
         upload_result = cloudinary.uploader.upload(
             temp_path,
-            resource_type='raw',  # For CSV files
+            resource_type='raw',
             folder='backtest_uploads',
             public_id=f"{os.path.splitext(filename)[0]}_{int(time.time())}"
         )
@@ -73,7 +74,7 @@ def upload_file():
 
 @app.route('/run-backtest', methods=['POST'])
 def run_backtest():
-    """Run backtest with uploaded file and return result + downloadable CSVs"""
+    """Run backtest with uploaded file and return results + charts + downloadable CSVs"""
     try:
         data = request.json
         file_url = data.get('file_url')
@@ -99,23 +100,48 @@ def run_backtest():
         with open(config_path, 'w') as f:
             json.dump(config, f)
         
-        # Run backtest (make sure trail_backtesting.py is in same directory)
+        # Run backtest
         import subprocess
         result = subprocess.run(
             ['python', 'trail_backtesting.py', config_path],
             capture_output=True,
             text=True,
-            timeout=600  # 10 minute timeout
+            timeout=600
         )
         
         if result.returncode != 0:
             return jsonify({'error': f'Backtest failed: {result.stderr}'}), 500
         
-        # Read results for UI
+        # Read results
         trades_df = pd.read_csv('trades.csv')
         metrics_df = pd.read_csv('metrics.csv')
         trades = trades_df.to_dict('records')
         metrics = metrics_df.to_dict('records')[0]
+        
+        # Generate chart data for frontend (equity curve & monthly returns)
+        chart_data = {'equity_curve': [], 'monthly_returns': []}
+        if not trades_df.empty:
+            # Equity Curve
+            equity_curve = []
+            for idx, row in trades_df.iterrows():
+                equity_curve.append({
+                    'trade_number': int(idx + 1),
+                    'date': str(row['exit_time']),
+                    'balance': float(row['balance_after_trade']) if 'balance_after_trade' in row else 0
+                })
+            
+            # Monthly Returns
+            trades_df['month'] = pd.to_datetime(trades_df['exit_time']).dt.to_period('M').astype(str)
+            monthly_pnl = trades_df.groupby('month')['pnl'].sum().reset_index()
+            monthly_returns = [
+                {'month': str(row['month']), 'pnl': float(row['pnl'])}
+                for _, row in monthly_pnl.iterrows()
+            ]
+            
+            chart_data = {
+                'equity_curve': equity_curve,
+                'monthly_returns': monthly_returns
+            }
         
         # Upload CSVs for download
         now_id = f"{int(time.time())}"
@@ -131,6 +157,25 @@ def run_backtest():
             folder='backtest_reports',
             public_id=f'backtest_{now_id}_metrics'
         )
+        
+        # Upload HTML plot files to Cloudinary
+        chart_files = []
+        plots_folder = 'plots'
+        if os.path.exists(plots_folder):
+            html_files = sorted([f for f in os.listdir(plots_folder) if f.endswith('.html')])
+            for html_file in html_files:
+                html_path = os.path.join(plots_folder, html_file)
+                try:
+                    chart_upload = cloudinary.uploader.upload(
+                        html_path,
+                        resource_type='raw',
+                        folder='backtest_charts',
+                        public_id=f'backtest_{now_id}_{os.path.splitext(html_file)[0]}'
+                    )
+                    chart_files.append(chart_upload['secure_url'])
+                except Exception as e:
+                    print(f"Failed to upload {html_file}: {e}")
+        
         download_links = {
             "trades_csv": trades_upload["secure_url"],
             "metrics_csv": metrics_upload["secure_url"]
@@ -141,10 +186,16 @@ def run_backtest():
             if os.path.exists(file):
                 os.remove(file)
         
+        # Clean up plots folder
+        if os.path.exists(plots_folder):
+            shutil.rmtree(plots_folder)
+        
         return jsonify({
             'success': True,
             'metrics': metrics,
             'trades': trades,
+            'chart_data': chart_data,
+            'chart_files': chart_files,
             'downloadLinks': download_links
         })
     
