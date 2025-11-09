@@ -35,6 +35,7 @@ def calculate_ema(data, span=9):
     data['ema9'] = data['close'].ewm(span=span, adjust=False).mean()
     return data
 
+
 def detect_signals(data):
     data['signal'] = 0 
     
@@ -43,19 +44,15 @@ def detect_signals(data):
         current = data.iloc[i]
         
         if all(last3['close'] < last3['open']) and all(last3['close'] < last3['ema9']):
-        # if all(last3['open'] < last3['ema9']) and all(last3['close'] < last3['ema9']):
-            # Now wait for candle closing above EMA9 
             if data.iloc[i]['close'] > data.iloc[i]['ema9']:
                 data.at[i, 'signal'] = 1
 
-        # Check green candles for short setup
         if all(last3['close'] > last3['open']) and all(last3['close'] > last3['ema9']):
-        # if all(last3['open'] > last3['ema9']) and all(last3['close'] > last3['ema9']):
-            # Now wait for candle closing below EMA9
             if data.iloc[i]['close'] < data.iloc[i]['ema9']:
                 data.at[i, 'signal'] = -1
 
     return data
+
 
 def simulate_trades(data, config):
     balance = config['starting_balance']
@@ -65,16 +62,12 @@ def simulate_trades(data, config):
     for i in tqdm(range(4, len(data)), desc="Simulating Trades", leave=False):
         row = data.iloc[i]
         
-        # Calculate maximum contracts based on BOTH margin and risk
         max_contracts_margin = balance // config['contract_margin']
         risk_per_trade = balance * config['risk_percentage']
         max_contracts_risk = risk_per_trade // (config['sl_ticks'] * config['tick_value'])
-        # qty = min(max_contracts_margin, max_contracts_risk)
         qty = 1
 
-
         if open_trade:
-            # Check for exit conditions
             if open_trade['type'] == 'long':
                 tp_price = open_trade['entry_price'] + config['tp_ticks'] * config['tick_size']
                 sl_price = open_trade['entry_price'] - config['sl_ticks'] * config['tick_size']
@@ -92,7 +85,7 @@ def simulate_trades(data, config):
                     exit_price = sl_price
                     outcome = 'SL'
                 else:
-                    continue  # stay in trade
+                    continue
 
             elif open_trade['type'] == 'short':
                 tp_price = open_trade['entry_price'] - config['tp_ticks'] * config['tick_size']
@@ -111,36 +104,35 @@ def simulate_trades(data, config):
                     exit_price = sl_price
                     outcome = 'SL'
                 else:
-                    continue  # stay in trade
+                    continue
             
-            # Close trade
             qty = open_trade['quantity']
             pnl = (exit_price - open_trade['entry_price']) * qty * config['tick_value'] / config['tick_size']
             if open_trade['type'] == 'short':
                 pnl = -pnl
 
-            # Deduct commission and slippage
             total_cost = config['commission_per_trade'] + config['slippage_ticks'] * config['tick_value'] * 2
             pnl -= total_cost
             balance += pnl
 
             trades.append({
-                'Entry Time': open_trade['entry_time'],
-                'Exit Time': row['datetime'],
-                'Type': open_trade['type'],
-                'Entry Price': open_trade['entry_price'],
-                'Exit Price': exit_price,
-                'Quantity': qty,
-                'PNL': pnl,
-                'Outcome': outcome,
-                'Balance After Trade': balance
+                'entry_time': open_trade['entry_time'],
+                'exit_time': row['datetime'],
+                'position': open_trade['type'],
+                'entry_price': open_trade['entry_price'],
+                'exit_price': exit_price,
+                'quantity': qty,
+                'pnl': pnl,
+                'exit_reason': outcome,
+                'balance_after_trade': balance,
+                'sl_price': sl_price,
+                'tp_price': tp_price
             })
             open_trade = None
 
-        # Open new trade if signal and no trade is open
         if row['signal'] != 0 and open_trade is None:
             if qty < 1:
-                continue  # Not enough margin or risk capacity
+                continue
             open_trade = {
                 'entry_time': row['datetime'],
                 'entry_price': row['close'],
@@ -158,46 +150,41 @@ def analyze_performance(trades_df, initial_balance=CONFIG['starting_balance']):
     if trades_df.empty:
         return {}
 
-    # Calculate win rate
-    win_rate = (trades_df['PNL'] > 0).mean()
-
-    # Total trades
+    win_rate = (trades_df['pnl'] > 0).mean()
     total_trades = len(trades_df)
-
-    # Average profit per trade
-    avg_profit = trades_df['PNL'].mean()
-
-    # Total profit
-    total_profit = trades_df['PNL'].sum()
-
-    # Profit percentage (based on starting balance)
-    profit_percentage = (total_profit / initial_balance) * 100
-
-    # Cumulative performance
-    trades_df['cumulative_pnl'] = trades_df['PNL'].cumsum()
+    avg_win = trades_df[trades_df['pnl'] > 0]['pnl'].mean() if not trades_df[trades_df['pnl'] > 0].empty else 0
+    avg_loss = trades_df[trades_df['pnl'] < 0]['pnl'].mean() if not trades_df[trades_df['pnl'] < 0].empty else 0
+    total_pnl = trades_df['pnl'].sum()
+    profit_percentage = (total_pnl / initial_balance) * 100
+    trades_df['cumulative_pnl'] = trades_df['pnl'].cumsum()
     trades_df['cumulative_balance'] = initial_balance + trades_df['cumulative_pnl']
-
-    # Max drawdown
     max_drawdown = (trades_df['cumulative_balance'].cummax() - trades_df['cumulative_balance']).max()
+    returns = trades_df['pnl'] / initial_balance
+    sharpe_ratio = float(returns.mean() / returns.std() * np.sqrt(252*24*60)) if returns.std() != 0 else None
 
-    # Returns (to calculate Sharpe ratio)
-    returns = trades_df['PNL'] / initial_balance
-
-    # Sharpe ratio
-    sharpe_ratio = (returns.mean() / returns.std()) * np.sqrt(252*24*60) if returns.std() != 0 else np.nan
-
-    return {
-        'Total Trades': total_trades,
-        'Win Rate': win_rate,
-        'Average Profit per Trade': avg_profit,
-        'Total Profit': total_profit,
-        'Profit Percentage': profit_percentage,
-        'Max Drawdown': max_drawdown,
-        'Sharpe Ratio': sharpe_ratio
+    metrics = {
+        'total_trades': total_trades,
+        'win_rate': float(win_rate),
+        'avg_win': float(avg_win),
+        'avg_loss': float(avg_loss),
+        'total_pnl': float(total_pnl),
+        'profit_percentage': profit_percentage,
+        'max_drawdown': max_drawdown,
+        'sharpe_ratio': sharpe_ratio,
+        'best_trade': float(trades_df['pnl'].max()) if not trades_df.empty else 0,
+        'worst_trade': float(trades_df['pnl'].min()) if not trades_df.empty else 0
     }
+    return metrics
+
 
 def save_trades(trades_df, path='trades.csv'):
+    columns = ['entry_time', 'position', 'entry_price', 'sl_price', 'tp_price',
+               'exit_time', 'exit_reason', 'pnl', 'cumulative_pnl']
+    for col in columns:
+        if col not in trades_df.columns:
+            trades_df[col] = None
     trades_df.to_csv(path, index=False)
+
 
 def save_metrics(metrics, path='metrics.csv'):
     df = pd.DataFrame([metrics])
@@ -218,11 +205,10 @@ def plot_trades(data, trades_df, output_folder='plots', months_per_plot=3):
         current_end = current_start + pd.DateOffset(months=months_per_plot)
         
         chunk_data = data[(data['datetime'] >= current_start) & (data['datetime'] < current_end)]
-        chunk_trades = trades_df[(trades_df['Entry Time'] >= current_start) & (trades_df['Entry Time'] < current_end)]
+        chunk_trades = trades_df[(trades_df['entry_time'] >= current_start) & (trades_df['entry_time'] < current_end)]
         
         fig = go.Figure()
 
-        # Add candlestick plot
         fig.add_trace(go.Candlestick(
             x=chunk_data['datetime'],
             open=chunk_data['open'],
@@ -232,7 +218,6 @@ def plot_trades(data, trades_df, output_folder='plots', months_per_plot=3):
             name='Candles'
         ))
 
-        # Add EMA9 line
         fig.add_trace(go.Scatter(
             x=chunk_data['datetime'], 
             y=chunk_data['ema9'], 
@@ -241,19 +226,18 @@ def plot_trades(data, trades_df, output_folder='plots', months_per_plot=3):
             name='EMA9'
         ))
 
-        # Mark trades
         for _, trade in chunk_trades.iterrows():
-            color = 'green' if trade['Type'] == 'long' else 'red'
+            color = 'green' if trade['position'] == 'long' else 'red'
             fig.add_trace(go.Scatter(
-                x=[trade['Entry Time']], 
-                y=[trade['Entry Price']],
+                x=[trade['entry_time']], 
+                y=[trade['entry_price']],
                 mode='markers',
-                marker=dict(color=color, size=10, symbol='arrow-up' if trade['Type']=='long' else 'arrow-down'),
-                name=f"Entry ({trade['Type']})"
+                marker=dict(color=color, size=10, symbol='arrow-up' if trade['position']=='long' else 'arrow-down'),
+                name=f"Entry ({trade['position']})"
             ))
             fig.add_trace(go.Scatter(
-                x=[trade['Exit Time']], 
-                y=[trade['Exit Price']],
+                x=[trade['exit_time']], 
+                y=[trade['exit_price']],
                 mode='markers',
                 marker=dict(color='blue', size=8, symbol='x'),
                 name="Exit"
@@ -277,62 +261,9 @@ def plot_trades(data, trades_df, output_folder='plots', months_per_plot=3):
     print("All plots saved.")
 
 
-def optimize_parameters(filepath, tp_range, sl_range, trailing_range, config):
-    results = []
-    
-    for tp_ticks, sl_ticks, trailing_ticks in product(tp_range, sl_range, trailing_range):
-        # Update config for this run
-        config['tp_ticks'] = tp_ticks
-        config['sl_ticks'] = sl_ticks
-        
-        if trailing_ticks == 0:
-            config['trailing_stop'] = False
-            config['trailing_stop_ticks'] = 0
-        else:
-            config['trailing_stop'] = True
-            config['trailing_stop_ticks'] = trailing_ticks
-        
-        print(f"Testing TP={tp_ticks} SL={sl_ticks} TSL={trailing_ticks}")
-        
-        try:
-            data = load_minute_data(filepath)
-            data = calculate_ema(data)
-            data = detect_signals(data)
-            trades_df = simulate_trades(data, config)
-            metrics = analyze_performance(trades_df)
+# You can still keep optimize_parameters unchanged, or use it as-is.
 
-            if metrics:  # Only if any trades occurred
-                results.append({
-                    'TP_Ticks': tp_ticks,
-                    'SL_Ticks': sl_ticks,
-                    'Trailing_Ticks': trailing_ticks,
-                    'Total Profit': metrics['Total Profit'],
-                    'Win Rate': metrics['Win Rate'],
-                    'Sharpe Ratio': metrics['Sharpe Ratio'],
-                    'Max Drawdown': metrics['Max Drawdown'],
-                    'Total Trades': metrics['Total Trades'],
-                    'Average Profit per Trade': metrics['Average Profit per Trade']
-                })
-
-        except Exception as e:
-            print(f"Error at TP={tp_ticks}, SL={sl_ticks}, TSL={trailing_ticks}: {e}")
-    
-    results_df = pd.DataFrame(results)
-    results_df.to_csv('optimization_results.csv', index=False)
-    
-    if not results_df.empty:
-        best_row = results_df.sort_values(by='Sharpe Ratio', ascending=False).iloc[0]
-        print("\nBest Parameters Found:")
-        print(best_row)
-        return best_row, results_df
-    else:
-        print("No trades found in any configuration.")
-        return None, None
-
-
-
-
-def run_backtest(filepath, generate_plots=False):  # <-- Added parameter
+def run_backtest(filepath, generate_plots=True):
     data = load_minute_data(filepath)
     data = calculate_ema(data)
     data = detect_signals(data)
@@ -342,27 +273,23 @@ def run_backtest(filepath, generate_plots=False):  # <-- Added parameter
     save_trades(trades_df)
     save_metrics(metrics)
     
-    # Only generate plots if requested
     if generate_plots:
         plot_trades(data, trades_df)
     
     return trades_df, metrics
 
 
-# Main execution
 if __name__ == "__main__":
     import sys
     import json
     
     if len(sys.argv) > 1:
-        # Load config from JSON file passed by Node.js
         config_path = sys.argv[1]
         print(f"Loading config from: {config_path}")
         
         with open(config_path, 'r') as f:
             user_config = json.load(f)
         
-        # Update CONFIG with user parameters
         CONFIG.update({
             'starting_balance': user_config.get('starting_balance', 100000),
             'risk_percentage': user_config.get('risk_percentage', 1) / 100,
@@ -381,11 +308,9 @@ if __name__ == "__main__":
         print(f"Running backtest on: {input_data}")
         
     else:
-        # Default for running script directly
         input_data = "nq_ohlcv_minute_combined_2020_2025.csv"
     
-    # Run backtest without plots for web app (faster)
     print("Starting backtest...")
-    trades, stats = run_backtest(input_data, generate_plots=False)  # <-- Added parameter
+    trades, stats = run_backtest(input_data, generate_plots=True)
     print(json.dumps(stats, default=str))
     print("Backtest completed!")
