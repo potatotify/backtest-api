@@ -1,11 +1,11 @@
 Flask==3.0.0
 flask-cors==4.0.0
-pandas==2.1.4
-numpy==1.26.2
+pandas==2.2.0
+numpy==1.26.3
 plotly==5.18.0
-scipy==1.11.4
+scipy==1.12.0
 tqdm==4.66.1
-cloudinary==1.37.0
+cloudinary==1.40.0
 gunicorn==21.2.0
 requests==2.31.0
-werkzeug==3.0.0
+werkzeug==3.0.1
