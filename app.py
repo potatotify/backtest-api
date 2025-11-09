@@ -73,7 +73,7 @@ def upload_file():
 
 @app.route('/run-backtest', methods=['POST'])
 def run_backtest():
-    """Run backtest with uploaded file"""
+    """Run backtest with uploaded file and return result + downloadable CSVs"""
     try:
         data = request.json
         file_url = data.get('file_url')
@@ -82,7 +82,6 @@ def run_backtest():
         if not file_url:
             return jsonify({'error': 'file_url is required'}), 400
         
-        # Download CSV from Cloudinary
         import requests
         response = requests.get(file_url)
         
@@ -97,7 +96,6 @@ def run_backtest():
             'filepath': temp_csv,
             **parameters
         }
-        
         with open(config_path, 'w') as f:
             json.dump(config, f)
         
@@ -113,22 +111,41 @@ def run_backtest():
         if result.returncode != 0:
             return jsonify({'error': f'Backtest failed: {result.stderr}'}), 500
         
-        # Read results
+        # Read results for UI
         trades_df = pd.read_csv('trades.csv')
         metrics_df = pd.read_csv('metrics.csv')
-        
         trades = trades_df.to_dict('records')
         metrics = metrics_df.to_dict('records')[0]
         
-        # Clean up temporary files
+        # Upload CSVs for download
+        now_id = f"{int(time.time())}"
+        trades_upload = cloudinary.uploader.upload(
+            'trades.csv',
+            resource_type='raw',
+            folder='backtest_reports',
+            public_id=f'backtest_{now_id}_trades'
+        )
+        metrics_upload = cloudinary.uploader.upload(
+            'metrics.csv',
+            resource_type='raw',
+            folder='backtest_reports',
+            public_id=f'backtest_{now_id}_metrics'
+        )
+        download_links = {
+            "trades_csv": trades_upload["secure_url"],
+            "metrics_csv": metrics_upload["secure_url"]
+        }
+        
+        # Clean up temp and output files
         for file in [temp_csv, config_path, 'trades.csv', 'metrics.csv']:
             if os.path.exists(file):
                 os.remove(file)
         
         return jsonify({
             'success': True,
+            'metrics': metrics,
             'trades': trades,
-            'metrics': metrics
+            'downloadLinks': download_links
         })
     
     except Exception as e:
