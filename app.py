@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import json
+import time
 import pandas as pd
 from werkzeug.utils import secure_filename
 import cloudinary
@@ -100,7 +101,7 @@ def run_backtest():
         with open(config_path, 'w') as f:
             json.dump(config, f)
         
-        # Run backtest
+        # Run backtest (make sure trail_backtesting.py is in same directory)
         import subprocess
         result = subprocess.run(
             ['python', 'trail_backtesting.py', config_path],
@@ -119,7 +120,7 @@ def run_backtest():
         trades = trades_df.to_dict('records')
         metrics = metrics_df.to_dict('records')[0]
         
-        # Clean up
+        # Clean up temporary files
         for file in [temp_csv, config_path, 'trades.csv', 'metrics.csv']:
             if os.path.exists(file):
                 os.remove(file)
