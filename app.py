@@ -4,14 +4,13 @@ import os
 import json
 import time
 import pandas as pd
-from werkzeug.utils import secure_filename
 import cloudinary
 import cloudinary.uploader
 import shutil
+import requests
 
 app = Flask(__name__)
 
-# Fix CORS configuration - Allow all origins and large requests
 CORS(app, resources={
     r"/*": {
         "origins": "*",
@@ -22,10 +21,6 @@ CORS(app, resources={
     }
 })
 
-# Configure for large uploads (200MB)
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
-
-# Configure Cloudinary
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
     api_key=os.getenv('CLOUDINARY_API_KEY'),
@@ -40,14 +35,11 @@ def home():
     return jsonify({
         'message': 'Trading Backtest API',
         'status': 'running',
-        'endpoints': ['/upload-and-backtest']
+        'endpoints': ['/run-backtest']
     })
 
-@app.route('/upload-and-backtest', methods=['POST', 'OPTIONS'])
-def upload_and_backtest():
-    """Handle preflight and upload + backtest in one endpoint"""
-    
-    # Handle preflight OPTIONS request
+@app.route('/run-backtest', methods=['POST', 'OPTIONS'])
+def run_backtest():
     if request.method == 'OPTIONS':
         response = jsonify({'status': 'ok'})
         response.headers.add('Access-Control-Allow-Origin', '*')
@@ -56,25 +48,22 @@ def upload_and_backtest():
         return response, 200
     
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file provided'}), 400
+        data = request.json
+        file_url = data.get('fileUrl')
+        parameters = data.get('parameters', {})
         
-        file = request.files['file']
+        if not file_url:
+            return jsonify({'error': 'fileUrl is required'}), 400
         
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
+        # Download from Cloudinary
+        print(f"Downloading file from: {file_url}")
+        response = requests.get(file_url, timeout=60)
         
-        if not file.filename.endswith('.csv'):
-            return jsonify({'error': 'Only CSV files allowed'}), 400
-        
-        # Get parameters from form data
-        parameters_json = request.form.get('parameters', '{}')
-        parameters = json.loads(parameters_json)
-        
-        # Save CSV temporarily
-        filename = secure_filename(file.filename)
-        temp_csv = os.path.join(UPLOAD_FOLDER, f"{int(time.time())}_{filename}")
-        file.save(temp_csv)
+        # Save temporarily
+        temp_csv = os.path.join(UPLOAD_FOLDER, f'temp_data_{int(time.time())}.csv')
+        with open(temp_csv, 'wb') as f:
+            f.write(response.content)
+        print(f"File saved to: {temp_csv}")
         
         # Create config file
         config_path = os.path.join(UPLOAD_FOLDER, f'config_{int(time.time())}.json')
@@ -87,6 +76,7 @@ def upload_and_backtest():
         
         # Run backtest
         import subprocess
+        print("Running backtest...")
         result = subprocess.run(
             ['python', 'trail_backtesting.py', config_path],
             capture_output=True,
@@ -95,7 +85,10 @@ def upload_and_backtest():
         )
         
         if result.returncode != 0:
+            print(f"Backtest error: {result.stderr}")
             return jsonify({'error': f'Backtest failed: {result.stderr}'}), 500
+        
+        print("Backtest completed successfully")
         
         # Read results
         trades_df = pd.read_csv('trades.csv')
@@ -126,8 +119,9 @@ def upload_and_backtest():
                 'monthly_returns': monthly_returns
             }
         
-        # Upload only result CSVs to Cloudinary
+        # Upload result CSVs to Cloudinary
         now_id = f"{int(time.time())}"
+        print("Uploading results to Cloudinary...")
         trades_upload = cloudinary.uploader.upload(
             'trades.csv',
             resource_type='raw',
@@ -164,7 +158,8 @@ def upload_and_backtest():
             "metrics_csv": metrics_upload["secure_url"]
         }
         
-        # Clean up temporary files
+        # Clean up
+        print("Cleaning up temporary files...")
         for file in [temp_csv, config_path, 'trades.csv', 'metrics.csv']:
             if os.path.exists(file):
                 os.remove(file)
@@ -172,6 +167,7 @@ def upload_and_backtest():
         if os.path.exists(plots_folder):
             shutil.rmtree(plots_folder)
         
+        print("Backtest complete!")
         return jsonify({
             'success': True,
             'metrics': metrics,
@@ -182,6 +178,7 @@ def upload_and_backtest():
         })
     
     except Exception as e:
+        print(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
