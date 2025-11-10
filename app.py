@@ -7,11 +7,13 @@ import pandas as pd
 from werkzeug.utils import secure_filename
 import cloudinary
 import cloudinary.uploader
-from cloudinary.utils import cloudinary_url
 import shutil
 
 app = Flask(__name__)
 CORS(app)
+
+# Configure for large uploads (200MB)
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
 # Configure Cloudinary
 cloudinary.config(
@@ -31,9 +33,9 @@ def home():
         'endpoints': ['/upload', '/run-backtest']
     })
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    """Upload CSV file to Cloudinary"""
+@app.route('/upload-and-backtest', methods=['POST'])
+def upload_and_backtest():
+    """Upload CSV, run backtest, return results - all in one endpoint"""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
@@ -46,53 +48,17 @@ def upload_file():
         if not file.filename.endswith('.csv'):
             return jsonify({'error': 'Only CSV files allowed'}), 400
         
-        # Save temporarily
+        # Get parameters from form data
+        parameters_json = request.form.get('parameters', '{}')
+        parameters = json.loads(parameters_json)
+        
+        # Save CSV temporarily
         filename = secure_filename(file.filename)
-        temp_path = os.path.join(UPLOAD_FOLDER, filename)
-        file.save(temp_path)
-        
-        # Upload to Cloudinary
-        upload_result = cloudinary.uploader.upload(
-            temp_path,
-            resource_type='raw',
-            folder='backtest_uploads',
-            public_id=f"{os.path.splitext(filename)[0]}_{int(time.time())}"
-        )
-        
-        # Clean up temp file
-        os.remove(temp_path)
-        
-        return jsonify({
-            'success': True,
-            'file_url': upload_result['secure_url'],
-            'public_id': upload_result['public_id'],
-            'filename': filename
-        })
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/run-backtest', methods=['POST'])
-def run_backtest():
-    """Run backtest with uploaded file and return results + charts + downloadable CSVs"""
-    try:
-        data = request.json
-        file_url = data.get('file_url')
-        parameters = data.get('parameters', {})
-        
-        if not file_url:
-            return jsonify({'error': 'file_url is required'}), 400
-        
-        import requests
-        response = requests.get(file_url)
-        
-        # Save temporarily
-        temp_csv = os.path.join(UPLOAD_FOLDER, 'temp_data.csv')
-        with open(temp_csv, 'wb') as f:
-            f.write(response.content)
+        temp_csv = os.path.join(UPLOAD_FOLDER, f"{int(time.time())}_{filename}")
+        file.save(temp_csv)
         
         # Create config file
-        config_path = os.path.join(UPLOAD_FOLDER, 'config.json')
+        config_path = os.path.join(UPLOAD_FOLDER, f'config_{int(time.time())}.json')
         config = {
             'filepath': temp_csv,
             **parameters
@@ -118,10 +84,9 @@ def run_backtest():
         trades = trades_df.to_dict('records')
         metrics = metrics_df.to_dict('records')[0]
         
-        # Generate chart data for frontend (equity curve & monthly returns)
+        # Generate chart data
         chart_data = {'equity_curve': [], 'monthly_returns': []}
         if not trades_df.empty:
-            # Equity Curve
             equity_curve = []
             for idx, row in trades_df.iterrows():
                 equity_curve.append({
@@ -130,7 +95,6 @@ def run_backtest():
                     'balance': float(row['balance_after_trade']) if 'balance_after_trade' in row else 0
                 })
             
-            # Monthly Returns
             trades_df['month'] = pd.to_datetime(trades_df['exit_time']).dt.to_period('M').astype(str)
             monthly_pnl = trades_df.groupby('month')['pnl'].sum().reset_index()
             monthly_returns = [
@@ -143,7 +107,7 @@ def run_backtest():
                 'monthly_returns': monthly_returns
             }
         
-        # Upload CSVs for download
+        # Upload only result CSVs to Cloudinary (these are small)
         now_id = f"{int(time.time())}"
         trades_upload = cloudinary.uploader.upload(
             'trades.csv',
@@ -158,7 +122,7 @@ def run_backtest():
             public_id=f'backtest_{now_id}_metrics'
         )
         
-        # Upload HTML plot files to Cloudinary
+        # Upload HTML charts
         chart_files = []
         plots_folder = 'plots'
         if os.path.exists(plots_folder):
@@ -181,12 +145,11 @@ def run_backtest():
             "metrics_csv": metrics_upload["secure_url"]
         }
         
-        # Clean up temp and output files
+        # Clean up ALL temporary files
         for file in [temp_csv, config_path, 'trades.csv', 'metrics.csv']:
             if os.path.exists(file):
                 os.remove(file)
         
-        # Clean up plots folder
         if os.path.exists(plots_folder):
             shutil.rmtree(plots_folder)
         
