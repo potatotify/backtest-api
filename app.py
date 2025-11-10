@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import os
 import json
@@ -8,6 +8,7 @@ import cloudinary
 import cloudinary.uploader
 import shutil
 import requests
+import subprocess
 
 app = Flask(__name__)
 
@@ -38,6 +39,10 @@ def home():
         'endpoints': ['/run-backtest']
     })
 
+def send_progress(stage, progress):
+    """Send progress update"""
+    return f"data: {json.dumps({'stage': stage, 'progress': progress})}\n\n"
+
 @app.route('/run-backtest', methods=['POST', 'OPTIONS'])
 def run_backtest():
     if request.method == 'OPTIONS':
@@ -55,17 +60,16 @@ def run_backtest():
         if not file_url:
             return jsonify({'error': 'fileUrl is required'}), 400
         
-        # Download from Cloudinary
-        print(f"Downloading file from: {file_url}")
+        # Step 1: Download from Cloudinary (0-50%)
+        print("Downloading file from Cloudinary...")
         response = requests.get(file_url, timeout=60)
         
-        # Save temporarily
         temp_csv = os.path.join(UPLOAD_FOLDER, f'temp_data_{int(time.time())}.csv')
         with open(temp_csv, 'wb') as f:
             f.write(response.content)
-        print(f"File saved to: {temp_csv}")
+        print(f"File downloaded: {temp_csv}")
         
-        # Create config file
+        # Step 2: Create config
         config_path = os.path.join(UPLOAD_FOLDER, f'config_{int(time.time())}.json')
         config = {
             'filepath': temp_csv,
@@ -74,9 +78,8 @@ def run_backtest():
         with open(config_path, 'w') as f:
             json.dump(config, f)
         
-        # Run backtest
-        import subprocess
-        print("Running backtest...")
+        # Step 3: Run backtest (50-90%)
+        print("Running backtest simulation...")
         result = subprocess.run(
             ['python', 'trail_backtesting.py', config_path],
             capture_output=True,
@@ -88,15 +91,14 @@ def run_backtest():
             print(f"Backtest error: {result.stderr}")
             return jsonify({'error': f'Backtest failed: {result.stderr}'}), 500
         
-        print("Backtest completed successfully")
+        print("Backtest completed")
         
-        # Read results
+        # Step 4: Process results (90-100%)
         trades_df = pd.read_csv('trades.csv')
         metrics_df = pd.read_csv('metrics.csv')
         trades = trades_df.to_dict('records')
         metrics = metrics_df.to_dict('records')[0]
         
-        # Generate chart data
         chart_data = {'equity_curve': [], 'monthly_returns': []}
         if not trades_df.empty:
             equity_curve = []
@@ -119,7 +121,7 @@ def run_backtest():
                 'monthly_returns': monthly_returns
             }
         
-        # Upload result CSVs to Cloudinary
+        # Upload results to Cloudinary
         now_id = f"{int(time.time())}"
         print("Uploading results to Cloudinary...")
         trades_upload = cloudinary.uploader.upload(
@@ -135,7 +137,6 @@ def run_backtest():
             public_id=f'backtest_{now_id}_metrics'
         )
         
-        # Upload HTML charts
         chart_files = []
         plots_folder = 'plots'
         if os.path.exists(plots_folder):
@@ -159,7 +160,7 @@ def run_backtest():
         }
         
         # Clean up
-        print("Cleaning up temporary files...")
+        print("Cleaning up...")
         for file in [temp_csv, config_path, 'trades.csv', 'metrics.csv']:
             if os.path.exists(file):
                 os.remove(file)
@@ -167,7 +168,7 @@ def run_backtest():
         if os.path.exists(plots_folder):
             shutil.rmtree(plots_folder)
         
-        print("Backtest complete!")
+        print("Done!")
         return jsonify({
             'success': True,
             'metrics': metrics,
