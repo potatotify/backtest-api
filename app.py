@@ -10,7 +10,17 @@ import cloudinary.uploader
 import shutil
 
 app = Flask(__name__)
-CORS(app)
+
+# Fix CORS configuration - Allow all origins and large requests
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Length"],
+        "max_age": 3600
+    }
+})
 
 # Configure for large uploads (200MB)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
@@ -30,12 +40,21 @@ def home():
     return jsonify({
         'message': 'Trading Backtest API',
         'status': 'running',
-        'endpoints': ['/upload', '/run-backtest']
+        'endpoints': ['/upload-and-backtest']
     })
 
-@app.route('/upload-and-backtest', methods=['POST'])
+@app.route('/upload-and-backtest', methods=['POST', 'OPTIONS'])
 def upload_and_backtest():
-    """Upload CSV, run backtest, return results - all in one endpoint"""
+    """Handle preflight and upload + backtest in one endpoint"""
+    
+    # Handle preflight OPTIONS request
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        return response, 200
+    
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
@@ -107,7 +126,7 @@ def upload_and_backtest():
                 'monthly_returns': monthly_returns
             }
         
-        # Upload only result CSVs to Cloudinary (these are small)
+        # Upload only result CSVs to Cloudinary
         now_id = f"{int(time.time())}"
         trades_upload = cloudinary.uploader.upload(
             'trades.csv',
@@ -145,7 +164,7 @@ def upload_and_backtest():
             "metrics_csv": metrics_upload["secure_url"]
         }
         
-        # Clean up ALL temporary files
+        # Clean up temporary files
         for file in [temp_csv, config_path, 'trades.csv', 'metrics.csv']:
             if os.path.exists(file):
                 os.remove(file)
